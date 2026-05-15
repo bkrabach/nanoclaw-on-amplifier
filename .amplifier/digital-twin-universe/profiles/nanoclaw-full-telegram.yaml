@@ -120,16 +120,20 @@ provision:
 
     # ---------- Phase 11: start nanoclaw daemon in background ----------
     - mkdir -p /root/nanoclaw/logs
-    - cd /root/nanoclaw && nohup node dist/index.js > logs/nanoclaw.log 2>&1 &
-    - sleep 8
+    - cd /root/nanoclaw && (nohup node dist/index.js > logs/nanoclaw.log 2>&1 & disown) && sleep 8
     - cat /root/nanoclaw/logs/nanoclaw.log | tail -30
-    - pgrep -af "node dist/index" || (echo "FAILED: nanoclaw daemon did not start" && cat /root/nanoclaw/logs/nanoclaw.log && exit 1)
-    - echo "Phase 11 done — nanoclaw daemon running"
+    - |
+      if ! pgrep -af "node dist/index" > /dev/null; then
+        echo "FAILED - nanoclaw daemon did not start"
+        cat /root/nanoclaw/logs/nanoclaw.log
+        exit 1
+      fi
+    - echo "Phase 11 done - nanoclaw daemon running"
 
     # ---------- Phase 12: wait for Telegram poll & message processing ----------
-    - sleep 20
-    - echo "=== nanoclaw.log tail (after 20s of running) ==="
-    - tail -80 /root/nanoclaw/logs/nanoclaw.log
+    - sleep 25
+    - echo "=== nanoclaw.log tail (after 25s of running) ==="
+    - tail -100 /root/nanoclaw/logs/nanoclaw.log
 
 readiness:
   - name: amplifierd-up
