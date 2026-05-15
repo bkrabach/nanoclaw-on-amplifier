@@ -63,19 +63,18 @@ provision:
     # Install: bootstrap deps + amplifierd + amp-claw CLI + write bundle for anthropic
     - export PATH="/root/.local/bin:/root/.bun/bin:$PATH" && cd /root/nanoclaw-on-amplifier && bash install.sh --skip-nanoclaw --backend anthropic --nanoclaw-dir /root/nanoclaw-stub
 
-    # Smoke test: amp-claw doctor (does the real round-trip)
+    # Comprehensive smoke test: amp-claw doctor does:
+    #   - daemon health
+    #   - bundle composition (build-up + provider-anthropic + tool-mcp)
+    #   - real Anthropic API call (Turn 1: 13×17=221)
+    #   - multi-turn context (Turn 2: 221÷13=17 — proves session continuity)
     - export PATH="/root/.nanoclaw-amp/bin:/root/.local/bin:$PATH" && amp-claw doctor
-
-    # Multi-turn validation: prove context carries across turns
-    - export PATH="/root/.nanoclaw-amp/bin:$PATH" && /root/.nanoclaw-amp/venv/bin/python /root/nanoclaw-on-amplifier/poc/smoke_test.py
 
 readiness:
   - name: amplifierd-up
     http:
       url: http://localhost:8410/health
       expect_json: {"status": "healthy"}
-  - name: doctor-passes
-    command: "/root/.nanoclaw-amp/bin/amp-claw doctor"
 
 access:
   ports:

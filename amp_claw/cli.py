@@ -410,29 +410,43 @@ def doctor() -> None:
 
 
 def _do_round_trip() -> str:
-    """Create a probe session, send 13×17, validate the answer."""
+    """Create a probe session, run two turns to prove multi-turn context,
+    delete cleanly. Real LLM calls — beyond trivial first-turn validation."""
     base = _amp_url()
-    # Tolerate 503 prewarm
-    for i in range(20):
-        r = httpx.post(f"{base}/sessions", json={"bundle_name": "nanoclaw-amp", "working_dir": "/tmp"}, timeout=30)
+    # Tolerate 503 prewarm — bundle prepare can take ~45s on first call
+    sid = None
+    for i in range(60):
+        r = httpx.post(f"{base}/sessions",
+                       json={"bundle_name": "nanoclaw-amp", "working_dir": "/tmp"},
+                       timeout=30)
         if r.status_code == 503:
             time.sleep(float(r.headers.get("Retry-After", 5))); continue
         r.raise_for_status()
+        sid = r.json()["session_id"]
         break
-    else:
-        raise RuntimeError("prewarm did not finish")
-    sid = r.json()["session_id"]
+    if sid is None:
+        raise RuntimeError("session create did not succeed in 60 attempts")
     try:
-        r = httpx.post(f"{base}/sessions/{sid}/execute",
-                       json={"prompt": "What is 13 times 17? Reply with just the number."},
-                       timeout=300)
-        r.raise_for_status()
-        resp = r.json().get("response") or ""
-        if "221" in resp:
-            return f"13×17={resp.strip()} (PASS)"
-        raise RuntimeError(f"unexpected reply: {resp[:200]}")
+        # ----- Turn 1: trivial math -----
+        r1 = httpx.post(f"{base}/sessions/{sid}/execute",
+                        json={"prompt": "What is 13 times 17? Reply with just the number, nothing else."},
+                        timeout=300)
+        r1.raise_for_status()
+        resp1 = (r1.json().get("response") or "").strip()
+        if "221" not in resp1:
+            raise RuntimeError(f"Turn 1 failed: expected '221' in response, got {resp1[:200]!r}")
+        # ----- Turn 2: prove multi-turn context -----
+        r2 = httpx.post(f"{base}/sessions/{sid}/execute",
+                        json={"prompt": "Divide that number by 13. Reply with just the number."},
+                        timeout=300)
+        r2.raise_for_status()
+        resp2 = (r2.json().get("response") or "").strip()
+        if "17" not in resp2:
+            raise RuntimeError(f"Turn 2 (multi-turn context) failed: expected '17', got {resp2[:200]!r}")
+        return f"13×17=221, 221÷13=17 (PASS — multi-turn context proven)"
     finally:
-        httpx.delete(f"{base}/sessions/{sid}", timeout=5)
+        try: httpx.delete(f"{base}/sessions/{sid}", timeout=5)
+        except Exception: pass
 
 
 @main.command("service")
