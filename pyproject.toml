@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nanoclaw-on-amplifier"
+version = "0.1.0"
+description = "Wrap nanoclaw with an Amplifier-powered provider"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Brian Krabach" }]
+dependencies = [
+    "click>=8.1.0",
+    "httpx>=0.28.0",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+]
+
+[project.scripts]
+amp-claw = "amp_claw.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["amp_claw"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.5"]

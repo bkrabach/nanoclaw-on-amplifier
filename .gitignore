@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.venv/
+dist/
+build/
+*.log
+.DS_Store
+
+# Local development files
+poc/.local-events.jsonl
+poc/.amplifierd.log
+
+# POC scratch
+poc/.amplifierd.log
+poc/.smoke.out
+poc/.smoke.pid
+poc/.amplifierd.pid
+poc/.local-events.jsonl
