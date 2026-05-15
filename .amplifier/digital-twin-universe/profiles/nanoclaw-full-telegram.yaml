@@ -66,15 +66,13 @@ provision:
     - node --version && pnpm --version
     - echo "Phase 3 done — uv/bun/node/pnpm installed"
 
-    # ---------- Phase 4: nanoclaw-on-amplifier (our repo) — install amplifierd + amp-claw ----------
+    # ---------- Phase 4: nanoclaw-on-amplifier — install amplifierd + amp-claw (no nanoclaw) ----------
     - git clone --depth 1 https://github.com/bkrabach/nanoclaw-on-amplifier.git /root/nanoclaw-on-amplifier
-    - export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH" && cd /root/nanoclaw-on-amplifier && bash install.sh --skip-nanoclaw --backend anthropic --nanoclaw-dir /tmp/discard-stub --port 8410 || true
-    # The stub install will have set up amplifierd, the amp-claw CLI, and the bundle YAML.
-    # Now we explicitly set bind-host to 0.0.0.0 so the agent containers can reach us via host.docker.internal:
-    - export PATH="/usr/local/bin:/root/.nanoclaw-amp/bin:$PATH" && amp-claw backend set anthropic --bind-host 0.0.0.0 --port 8410
-    - amp-claw restart
-    - sleep 4 && curl -sf http://127.0.0.1:8410/health
-    - echo "Phase 4 done — amplifierd healthy on 0.0.0.0:8410"
+    - export PATH="/root/.local/bin:/root/.bun/bin:$PATH" && cd /root/nanoclaw-on-amplifier && bash install.sh --amplifierd-only --backend anthropic --bind-host 0.0.0.0 --port 8410
+    # Verify amp-claw is on /usr/local/bin (install.sh creates the symlink as root)
+    - which amp-claw && amp-claw status
+    - sleep 2 && curl -sf http://127.0.0.1:8410/health
+    - echo "Phase 4 done — amplifierd healthy on 0.0.0.0:8410, amp-claw on PATH"
 
     # ---------- Phase 5: clone + install nanoclaw v2 ----------
     - git clone --depth 1 https://github.com/nanocoai/nanoclaw.git /root/nanoclaw

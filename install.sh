@@ -20,17 +20,21 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || pwd)"
 # ---------- Args ----------
 SKIP_NANOCLAW=0
 RECONFIGURE=0
+AMPLIFIERD_ONLY=0
+BIND_HOST="127.0.0.1"
 BACKEND=""
 PORT="8410"
 NANOCLAW_DIR="${NANOCLAW_DIR:-$HOME/nanoclaw}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --skip-nanoclaw) SKIP_NANOCLAW=1; shift ;;
-    --reconfigure)   RECONFIGURE=1; shift ;;
-    --backend)       BACKEND="$2"; shift 2 ;;
-    --port)          PORT="$2"; shift 2 ;;
-    --nanoclaw-dir)  NANOCLAW_DIR="$2"; shift 2 ;;
+    --skip-nanoclaw)    SKIP_NANOCLAW=1; shift ;;
+    --amplifierd-only)  AMPLIFIERD_ONLY=1; SKIP_NANOCLAW=1; shift ;;
+    --reconfigure)      RECONFIGURE=1; shift ;;
+    --backend)          BACKEND="$2"; shift 2 ;;
+    --port)             PORT="$2"; shift 2 ;;
+    --bind-host)        BIND_HOST="$2"; shift 2 ;;
+    --nanoclaw-dir)     NANOCLAW_DIR="$2"; shift 2 ;;
     -h|--help)
       head -15 "$0" | tail -12
       exit 0
@@ -94,9 +98,11 @@ if [[ $SKIP_NANOCLAW -eq 0 ]]; then
   NANOCLAW_SKIP=auth,cli-agent bash nanoclaw.sh || warn "nanoclaw setup exited non-zero (may be OK if just stopped early)"
 fi
 
-cd "$NANOCLAW_DIR"
-[[ -f pnpm-workspace.yaml && -f src/db/schema.ts ]] || fail "Not a nanoclaw v2 checkout at $NANOCLAW_DIR"
-ok "nanoclaw v2 detected at $NANOCLAW_DIR"
+if [[ $AMPLIFIERD_ONLY -eq 0 ]]; then
+  cd "$NANOCLAW_DIR"
+  [[ -f pnpm-workspace.yaml && -f src/db/schema.ts ]] || fail "Not a nanoclaw v2 checkout at $NANOCLAW_DIR"
+  ok "nanoclaw v2 detected at $NANOCLAW_DIR"
+fi
 
 # ---------- Install amplifierd into isolated namespace ----------
 say "Installing amplifierd into ~/.nanoclaw-amp/ (isolated namespace)"
@@ -197,10 +203,16 @@ MENU
 fi
 
 if [[ -n "$BACKEND" ]]; then
-  "$HOME/.nanoclaw-amp/bin/amp-claw" backend set "$BACKEND" --port "$PORT"
+  "$HOME/.nanoclaw-amp/bin/amp-claw" backend set "$BACKEND" --port "$PORT" --bind-host "$BIND_HOST"
 fi
 
 # ---------- Wedge the provider files into nanoclaw ----------
+if [[ $AMPLIFIERD_ONLY -eq 1 ]]; then
+  say "Skipping nanoclaw wedge (--amplifierd-only)"
+  "$HOME/.nanoclaw-amp/bin/amp-claw" doctor || warn "doctor reported issues; check logs"
+  exit 0
+fi
+
 say "Wedging amplifier provider into $NANOCLAW_DIR"
 
 # Locate the provider files. Prefer the local checkout (SCRIPT_DIR) over
