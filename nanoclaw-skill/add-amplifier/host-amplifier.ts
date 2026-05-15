@@ -3,10 +3,15 @@
 // amplifierd running on the host in ~/.nanoclaw-amp/.
 //
 // Pattern: mirror src/providers/codex.ts (the /add-codex skill).
+// API: src/providers/provider-container-registry.ts exports
+// `registerProviderContainerConfig(name, fn)`.
 
-import { registerProvider, type ProviderContainerConfigFn } from './provider-container-registry.js';
+import {
+  registerProviderContainerConfig,
+  type ProviderContainerConfigFn,
+} from './provider-container-registry.js';
 
-const configFn: ProviderContainerConfigFn = () => {
+const configFn: ProviderContainerConfigFn = (_ctx) => {
   const port = process.env.AMPLIFIERD_PORT || '8410';
   return {
     env: {
@@ -18,4 +23,4 @@ const configFn: ProviderContainerConfigFn = () => {
   };
 };
 
-registerProvider('amplifier', configFn);
+registerProviderContainerConfig('amplifier', configFn);
