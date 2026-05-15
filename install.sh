@@ -52,9 +52,16 @@ fi
 command -v uv >/dev/null || fail "uv install failed"
 ok "uv $(uv --version | awk '{print $2}')"
 
-# Docker (nanoclaw needs it for per-session agent containers)
-command -v docker >/dev/null || fail "Docker required for nanoclaw (https://docs.docker.com/get-docker/)"
-ok "docker $(docker --version | head -1)"
+# Docker (nanoclaw needs it for per-session agent containers; we skip the
+# check when --skip-nanoclaw is set so the installer can run in environments
+# that only need amplifierd + amp-claw, e.g. DTU profiles or remote daemon
+# hosts)
+if [[ $SKIP_NANOCLAW -eq 0 ]]; then
+  command -v docker >/dev/null || fail "Docker required for nanoclaw (https://docs.docker.com/get-docker/)"
+  ok "docker $(docker --version | head -1)"
+else
+  command -v docker >/dev/null 2>&1 && ok "docker $(docker --version | head -1)" || warn "docker missing (OK with --skip-nanoclaw)"
+fi
 
 # Node/pnpm/bun — nanoclaw bootstraps these itself when we run its installer,
 # but if they exist we save some time.
@@ -192,8 +199,11 @@ HOST
 fi
 
 cp "$SKILL_BASE/nanoclaw-provider/amplifier.ts" "$NANOCLAW_DIR/container/agent-runner/src/providers/amplifier.ts"
-cp "$SKILL_BASE/nanoclaw-skill/add-amplifier/host-amplifier.ts" "$NANOCLAW_DIR/src/providers/amplifier.ts" 2>/dev/null || \
+if [[ -f "$SKILL_BASE/nanoclaw-skill/add-amplifier/host-amplifier.ts" ]]; then
+  cp "$SKILL_BASE/nanoclaw-skill/add-amplifier/host-amplifier.ts" "$NANOCLAW_DIR/src/providers/amplifier.ts"
+elif [[ -f "$SKILL_BASE/host-amplifier.ts" ]]; then
   cp "$SKILL_BASE/host-amplifier.ts" "$NANOCLAW_DIR/src/providers/amplifier.ts"
+fi
 ok "Provider files dropped"
 
 # Append barrels (idempotent)

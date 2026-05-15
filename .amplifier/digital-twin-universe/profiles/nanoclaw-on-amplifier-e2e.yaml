@@ -1,0 +1,84 @@
+# nanoclaw-on-amplifier end-to-end DTU profile.
+#
+# Validates the local stack of nanoclaw-on-amplifier in a fresh Ubuntu
+# environment: installs amplifierd into ~/.nanoclaw-amp/, configures it for
+# Anthropic, and runs `amp-claw doctor` which exercises the full round-trip
+# against the real Anthropic API.
+#
+# Out-of-band requirements:
+#   - host env var ANTHROPIC_API_KEY (forwarded via passthrough.services)
+#   - this profile lives inside the nanoclaw-on-amplifier repo and is run
+#     after `git push` so the in-container clone gets the same code
+#
+# Launch:
+#   amplifier-digital-twin launch nanoclaw-on-amplifier-e2e
+
+name: nanoclaw-on-amplifier-e2e
+description: |
+  End-to-end validation of nanoclaw-on-amplifier — amplifierd installs into
+  ~/.nanoclaw-amp/, the amp-claw CLI configures Anthropic as the backend,
+  and `amp-claw doctor` runs a real LLM round-trip (13×17 → 221) plus a
+  multi-turn validation that proves context persistence across turns.
+
+base:
+  image: ubuntu:24.04
+  config:
+    limits.cpu: "4"
+    limits.memory: "4GiB"
+
+passthrough:
+  services:
+    - name: anthropic
+      key_env: ANTHROPIC_API_KEY
+
+provision:
+  setup_cmds:
+    # Bootstrap deps
+    - apt-get update -qq && apt-get install -y --no-install-recommends git curl ca-certificates sqlite3 build-essential python3 python3-venv unzip > /dev/null
+
+    # uv (we install amplifierd via uv)
+    - curl -LsSf https://astral.sh/uv/install.sh | sh
+    - test -x /root/.local/bin/uv
+
+    # bun (the amplifier.ts provider runs under bun in the nanoclaw container;
+    # for this E2E we also run it under bun for parity)
+    - curl -fsSL https://bun.com/install | bash
+    - test -x /root/.bun/bin/bun
+
+    # Clone our repo
+    - git clone --depth 1 https://github.com/bkrabach/nanoclaw-on-amplifier.git /root/nanoclaw-on-amplifier
+
+    # Run install.sh in --skip-nanoclaw mode so we don't pull in the full
+    # nanoclaw + Docker-in-Incus stack — this profile validates the
+    # amplifierd + amp-claw + provider files, which is the value-add of our
+    # repo. (Full nanoclaw integration is exercised by mounting a real
+    # nanoclaw checkout; see SKILL.md.)
+    - mkdir -p /root/nanoclaw-stub && touch /root/nanoclaw-stub/pnpm-workspace.yaml
+    - mkdir -p /root/nanoclaw-stub/src/db && echo "// v2.db marker" > /root/nanoclaw-stub/src/db/schema.ts
+    - mkdir -p /root/nanoclaw-stub/container/agent-runner/src/providers
+    - mkdir -p /root/nanoclaw-stub/src/providers
+    - echo "// barrel" > /root/nanoclaw-stub/src/providers/index.ts
+    - echo "// barrel" > /root/nanoclaw-stub/container/agent-runner/src/providers/index.ts
+
+    # Install: bootstrap deps + amplifierd + amp-claw CLI + write bundle for anthropic
+    - export PATH="/root/.local/bin:/root/.bun/bin:$PATH" && cd /root/nanoclaw-on-amplifier && bash install.sh --skip-nanoclaw --backend anthropic --nanoclaw-dir /root/nanoclaw-stub
+
+    # Smoke test: amp-claw doctor (does the real round-trip)
+    - export PATH="/root/.nanoclaw-amp/bin:/root/.local/bin:$PATH" && amp-claw doctor
+
+    # Multi-turn validation: prove context carries across turns
+    - export PATH="/root/.nanoclaw-amp/bin:$PATH" && /root/.nanoclaw-amp/venv/bin/python /root/nanoclaw-on-amplifier/poc/smoke_test.py
+
+readiness:
+  - name: amplifierd-up
+    http:
+      url: http://localhost:8410/health
+      expect_json: {"status": "healthy"}
+  - name: doctor-passes
+    command: "/root/.nanoclaw-amp/bin/amp-claw doctor"
+
+access:
+  ports:
+    - host: 18410
+      container: 8410
+      label: amplifierd
