@@ -11,6 +11,12 @@
 
 set -euo pipefail
 
+# Resolve our own absolute directory BEFORE any cd. install.sh may be invoked
+# as `bash install.sh` (where $0='install.sh' and dirname is '.'). We need
+# the absolute repo root so cp commands later don't lose context after
+# `cd "$NANOCLAW_DIR"`.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || pwd)"
+
 # ---------- Args ----------
 SKIP_NANOCLAW=0
 RECONFIGURE=0
@@ -113,8 +119,8 @@ ok "amplifierd installed at ~/.nanoclaw-amp/bin/amplifierd"
 # ---------- Install amp-claw CLI ----------
 say "Installing amp-claw CLI"
 # In-tree development install: use this repo if invoked from within it.
-if [[ -f "$(dirname "$0")/pyproject.toml" ]] && grep -q "name = \"nanoclaw-on-amplifier\"" "$(dirname "$0")/pyproject.toml"; then
-  VIRTUAL_ENV="$HOME/.nanoclaw-amp/venv" uv pip install -e "$(dirname "$0")" >/dev/null
+if [[ -f "$SCRIPT_DIR/pyproject.toml" ]] && grep -q "name = \"nanoclaw-on-amplifier\"" "$SCRIPT_DIR/pyproject.toml"; then
+  VIRTUAL_ENV="$HOME/.nanoclaw-amp/venv" uv pip install -e "$SCRIPT_DIR" >/dev/null
 else
   VIRTUAL_ENV="$HOME/.nanoclaw-amp/venv" uv pip install \
     "git+https://github.com/bkrabach/nanoclaw-on-amplifier@main" >/dev/null
@@ -171,38 +177,26 @@ fi
 # ---------- Wedge the provider files into nanoclaw ----------
 say "Wedging amplifier provider into $NANOCLAW_DIR"
 
-SKILL_BASE="$(dirname "$0")"
-if [[ ! -f "$SKILL_BASE/nanoclaw-provider/amplifier.ts" ]]; then
-  # Fetch from github when running via curl-pipe
+# Locate the provider files. Prefer the local checkout (SCRIPT_DIR) over
+# fetching from GitHub. The curl-pipe path lands as a single file, so we
+# fetch into a temp dir laid out the same way as the repo.
+PROVIDER_SRC=""
+HOST_PROVIDER_SRC=""
+if [[ -f "$SCRIPT_DIR/nanoclaw-provider/amplifier.ts" ]]; then
+  PROVIDER_SRC="$SCRIPT_DIR/nanoclaw-provider/amplifier.ts"
+  HOST_PROVIDER_SRC="$SCRIPT_DIR/nanoclaw-skill/add-amplifier/host-amplifier.ts"
+else
   TMP=$(mktemp -d)
   curl -fsSL "https://raw.githubusercontent.com/bkrabach/nanoclaw-on-amplifier/main/nanoclaw-provider/amplifier.ts" \
     -o "$TMP/amplifier.ts"
   curl -fsSL "https://raw.githubusercontent.com/bkrabach/nanoclaw-on-amplifier/main/nanoclaw-skill/add-amplifier/host-amplifier.ts" \
-    -o "$TMP/host-amplifier.ts" 2>/dev/null || \
-    cat > "$TMP/host-amplifier.ts" <<'HOST'
-// Auto-generated host-side container-config for the amplifier provider.
-import { registerProvider, type ProviderContainerConfigFn } from './provider-container-registry.js';
-const configFn: ProviderContainerConfigFn = () => {
-  const port = process.env.AMPLIFIERD_PORT || '8410';
-  return {
-    env: {
-      AMPLIFIERD_URL: `http://host.docker.internal:${port}`,
-      AMPLIFIER_DEFAULT_BUNDLE: 'nanoclaw-amp',
-      NO_PROXY: 'host.docker.internal,localhost,127.0.0.1',
-      no_proxy: 'host.docker.internal,localhost,127.0.0.1',
-    },
-  };
-};
-registerProvider('amplifier', configFn);
-HOST
-  SKILL_BASE="$TMP"
+    -o "$TMP/host-amplifier.ts"
+  PROVIDER_SRC="$TMP/amplifier.ts"
+  HOST_PROVIDER_SRC="$TMP/host-amplifier.ts"
 fi
-
-cp "$SKILL_BASE/nanoclaw-provider/amplifier.ts" "$NANOCLAW_DIR/container/agent-runner/src/providers/amplifier.ts"
-if [[ -f "$SKILL_BASE/nanoclaw-skill/add-amplifier/host-amplifier.ts" ]]; then
-  cp "$SKILL_BASE/nanoclaw-skill/add-amplifier/host-amplifier.ts" "$NANOCLAW_DIR/src/providers/amplifier.ts"
-elif [[ -f "$SKILL_BASE/host-amplifier.ts" ]]; then
-  cp "$SKILL_BASE/host-amplifier.ts" "$NANOCLAW_DIR/src/providers/amplifier.ts"
+cp "$PROVIDER_SRC" "$NANOCLAW_DIR/container/agent-runner/src/providers/amplifier.ts"
+if [[ -f "$HOST_PROVIDER_SRC" ]]; then
+  cp "$HOST_PROVIDER_SRC" "$NANOCLAW_DIR/src/providers/amplifier.ts"
 fi
 ok "Provider files dropped"
 
