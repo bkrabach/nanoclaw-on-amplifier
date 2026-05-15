@@ -128,13 +128,39 @@ fi
 ln -sf "$HOME/.nanoclaw-amp/venv/bin/amp-claw" "$HOME/.nanoclaw-amp/bin/amp-claw"
 ok "amp-claw at ~/.nanoclaw-amp/bin/amp-claw"
 
-# Ensure ~/.nanoclaw-amp/bin is on PATH
+# Ensure ~/.nanoclaw-amp/bin is on PATH for interactive shells.
 if ! echo ":$PATH:" | grep -q ":$HOME/.nanoclaw-amp/bin:"; then
   for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
     [[ -f "$rc" ]] || continue
     grep -qF ".nanoclaw-amp/bin" "$rc" || \
       echo 'export PATH="$HOME/.nanoclaw-amp/bin:$PATH"' >> "$rc"
   done
+fi
+
+# Also expose the binaries at /usr/local/bin so they work in non-interactive
+# contexts: system services (systemd/launchd), DTU `incus exec`, scripts that
+# don't source any rc file. We attempt this with sudo if /usr/local/bin is
+# not writable; fall back to ~/.local/bin (which most distros put on PATH
+# via /etc/profile.d).
+LINK_DEST=""
+if [[ -w /usr/local/bin ]] 2>/dev/null; then
+  LINK_DEST=/usr/local/bin
+elif sudo -n true 2>/dev/null && sudo test -w /usr/local/bin; then
+  LINK_DEST=/usr/local/bin
+elif [[ -d "$HOME/.local/bin" ]] || mkdir -p "$HOME/.local/bin"; then
+  LINK_DEST="$HOME/.local/bin"
+fi
+if [[ -n "$LINK_DEST" ]]; then
+  if [[ "$LINK_DEST" == /usr/local/bin && ! -w "$LINK_DEST" ]]; then
+    sudo ln -sf "$HOME/.nanoclaw-amp/bin/amp-claw"   "$LINK_DEST/amp-claw"
+    sudo ln -sf "$HOME/.nanoclaw-amp/bin/amplifierd" "$LINK_DEST/amplifierd"
+  else
+    ln -sf "$HOME/.nanoclaw-amp/bin/amp-claw"   "$LINK_DEST/amp-claw"
+    ln -sf "$HOME/.nanoclaw-amp/bin/amplifierd" "$LINK_DEST/amplifierd"
+  fi
+  ok "Linked binaries into $LINK_DEST (visible to all shells + services)"
+else
+  warn "Couldn't link into /usr/local/bin or ~/.local/bin; rely on rc-file PATH only"
 fi
 
 # ---------- Pick a backend ----------
