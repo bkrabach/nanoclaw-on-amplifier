@@ -1,0 +1,150 @@
+# nanoclaw-on-amplifier — FULL end-to-end profile with Telegram.
+#
+# Stands up the entire stack in a single Incus container:
+#   - Ubuntu 24.04 + Docker engine (docker-in-incus, nesting enabled by default)
+#   - amplifierd in ~/.nanoclaw-amp/ (bound to 0.0.0.0 so docker bridge can reach it)
+#   - nanoclaw v2 clone + install + OneCLI
+#   - Telegram adapter installed and bot token persisted
+#   - Our amplifier.ts wedged into nanoclaw's providers
+#   - DB triple-write (agent_groups/sessions/container_configs.agent_provider='amplifier')
+#   - init-first-agent for the chat_id passed in
+#   - nanoclaw running as a background process
+#
+# Out-of-band:
+#   - ANTHROPIC_API_KEY in host env (forwarded via passthrough.services)
+#   - TELEGRAM_BOT_TOKEN in host env (forwarded via passthrough.services)
+#   - TELEGRAM_CHAT_ID and TELEGRAM_USER_ID as --var
+#
+# Launch:
+#   amplifier-digital-twin launch nanoclaw-full-telegram \
+#     --var TELEGRAM_CHAT_ID=8474612815 \
+#     --var TELEGRAM_USER_ID=8474612815 \
+#     --var TELEGRAM_USER_NAME=Brian
+
+name: nanoclaw-full-telegram
+description: |
+  Full nanoclaw + Amplifier brain + Telegram. Picks up any pending Telegram
+  messages on first poll and routes them through Amplifier (build-up bundle +
+  provider-anthropic), with replies delivered back to the user's Telegram.
+
+base:
+  image: ubuntu:24.04
+  config:
+    limits.cpu: "6"
+    limits.memory: "8GiB"
+    # security.nesting=true is applied by DTU launch by default (needed for Docker-in-Incus)
+
+passthrough:
+  services:
+    - name: anthropic
+      key_env: ANTHROPIC_API_KEY
+    - name: telegram
+      key_env: TELEGRAM_BOT_TOKEN
+
+provision:
+  setup_cmds:
+    # ---------- Phase 1: system deps ----------
+    - apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git curl ca-certificates sqlite3 build-essential python3 python3-venv unzip acl jq sudo iproute2 dnsutils > /dev/null
+    - echo "Phase 1 done — base packages installed"
+
+    # ---------- Phase 2: Docker engine (docker-in-incus) ----------
+    - curl -fsSL https://get.docker.com | sh > /var/log/docker-install.log 2>&1
+    # Docker daemon may not auto-start under Incus' init; try systemd first, fall back to direct start
+    - (systemctl start docker || (dockerd > /var/log/dockerd.log 2>&1 &) ) && sleep 5
+    - docker info > /var/log/docker-info.log 2>&1 || (echo "Docker daemon failed to start" && cat /var/log/dockerd.log && exit 1)
+    - echo "Phase 2 done — Docker engine running"
+
+    # ---------- Phase 3: language runtimes ----------
+    - curl -LsSf https://astral.sh/uv/install.sh | sh
+    - export PATH="$HOME/.local/bin:$PATH" && uv --version
+    - curl -fsSL https://bun.com/install | bash
+    - export PATH="$HOME/.bun/bin:$PATH" && bun --version
+    # Node 22 + pnpm (nanoclaw requires Node >=20 and pnpm >=10)
+    - curl -fsSL https://deb.nodesource.com/setup_22.x | bash - > /dev/null
+    - apt-get install -y nodejs > /dev/null
+    - npm install -g pnpm@10
+    - node --version && pnpm --version
+    - echo "Phase 3 done — uv/bun/node/pnpm installed"
+
+    # ---------- Phase 4: nanoclaw-on-amplifier (our repo) — install amplifierd + amp-claw ----------
+    - git clone --depth 1 https://github.com/bkrabach/nanoclaw-on-amplifier.git /root/nanoclaw-on-amplifier
+    - export PATH="$HOME/.local/bin:$HOME/.bun/bin:$PATH" && cd /root/nanoclaw-on-amplifier && bash install.sh --skip-nanoclaw --backend anthropic --nanoclaw-dir /tmp/discard-stub --port 8410 || true
+    # The stub install will have set up amplifierd, the amp-claw CLI, and the bundle YAML.
+    # Now we explicitly set bind-host to 0.0.0.0 so the agent containers can reach us via host.docker.internal:
+    - export PATH="/usr/local/bin:/root/.nanoclaw-amp/bin:$PATH" && amp-claw backend set anthropic --bind-host 0.0.0.0 --port 8410
+    - amp-claw restart
+    - sleep 4 && curl -sf http://127.0.0.1:8410/health
+    - echo "Phase 4 done — amplifierd healthy on 0.0.0.0:8410"
+
+    # ---------- Phase 5: clone + install nanoclaw v2 ----------
+    - git clone --depth 1 https://github.com/nanocoai/nanoclaw.git /root/nanoclaw
+    - cd /root/nanoclaw && pnpm install --silent 2>&1 | tail -20
+    - echo "Phase 5 done — nanoclaw cloned + deps installed"
+
+    # ---------- Phase 6: nanoclaw setup (skip auth/cli-agent/channel/verify/service) ----------
+    # We skip 'service' because systemd-user inside Incus is fragile; we'll
+    # start nanoclaw as a background process manually below.
+    - cd /root/nanoclaw && NANOCLAW_SKIP="auth,cli-agent,first-chat,channel,verify,service" pnpm run setup:auto 2>&1 | tee /var/log/nanoclaw-setup.log | tail -50 || true
+    # Show how far we got
+    - cat /var/log/nanoclaw-setup.log | grep -E "STATUS=|SKIPPED|FAILED|done|ready" | tail -30 || true
+    - echo "Phase 6 done — nanoclaw setup completed (skipping auth/channel/service)"
+
+    # ---------- Phase 7: Telegram adapter install ----------
+    - cd /root/nanoclaw && TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN}" bash setup/add-telegram.sh 2>&1 | tail -30 || (echo "add-telegram failed, dumping log" && tail -50 /var/log/nanoclaw-setup.log)
+    - echo "Phase 7 done — Telegram adapter installed + token persisted"
+
+    # ---------- Phase 8: Wedge our amplifier provider into nanoclaw ----------
+    - cp /root/nanoclaw-on-amplifier/nanoclaw-provider/amplifier.ts /root/nanoclaw/container/agent-runner/src/providers/amplifier.ts
+    - cp /root/nanoclaw-on-amplifier/nanoclaw-skill/add-amplifier/host-amplifier.ts /root/nanoclaw/src/providers/amplifier.ts
+    - LINE="import './amplifier.js';" && grep -qxF "$LINE" /root/nanoclaw/src/providers/index.ts || echo "$LINE" >> /root/nanoclaw/src/providers/index.ts
+    - LINE="import './amplifier.js';" && grep -qxF "$LINE" /root/nanoclaw/container/agent-runner/src/providers/index.ts || echo "$LINE" >> /root/nanoclaw/container/agent-runner/src/providers/index.ts
+    # Rebuild to pick up our provider
+    - cd /root/nanoclaw && pnpm run build 2>&1 | tail -10
+    - echo "Phase 8 done — amplifier provider wedged + nanoclaw rebuilt"
+
+    # ---------- Phase 9: init-first-agent for the existing Telegram chat ----------
+    # The user (chat_id ${TELEGRAM_CHAT_ID}) has already DM'd the bot once.
+    # Wire an agent_group bound to their chat with provider=amplifier from the start.
+    - cd /root/nanoclaw && pnpm exec tsx scripts/init-first-agent.ts --channel telegram --user-id "telegram:${TELEGRAM_USER_ID}" --platform-id "${TELEGRAM_CHAT_ID}" --display-name "${TELEGRAM_USER_NAME}" --agent-name "Amplifier" --role owner 2>&1 | tee /var/log/init-first-agent.log | tail -30 || true
+    - echo "Phase 9 done — init-first-agent attempted"
+
+    # ---------- Phase 10: DB triple-write — force amplifier provider ----------
+    - |
+      sqlite3 /root/nanoclaw/data/v2.db <<'SQL'
+      UPDATE agent_groups      SET agent_provider='amplifier';
+      UPDATE sessions          SET agent_provider='amplifier';
+      UPDATE container_configs SET provider='amplifier';
+      SELECT 'agent_groups:' AS t, id, name, agent_provider FROM agent_groups;
+      SELECT 'messaging_groups:' AS t, id, channel_type, platform_id FROM messaging_groups;
+      SELECT 'container_configs:' AS t, agent_group_id, provider FROM container_configs;
+      SQL
+    - echo "Phase 10 done — DB columns set to amplifier"
+
+    # ---------- Phase 11: start nanoclaw daemon in background ----------
+    - mkdir -p /root/nanoclaw/logs
+    - cd /root/nanoclaw && nohup node dist/index.js > logs/nanoclaw.log 2>&1 &
+    - sleep 8
+    - cat /root/nanoclaw/logs/nanoclaw.log | tail -30
+    - pgrep -af "node dist/index" || (echo "FAILED: nanoclaw daemon did not start" && cat /root/nanoclaw/logs/nanoclaw.log && exit 1)
+    - echo "Phase 11 done — nanoclaw daemon running"
+
+    # ---------- Phase 12: wait for Telegram poll & message processing ----------
+    - sleep 20
+    - echo "=== nanoclaw.log tail (after 20s of running) ==="
+    - tail -80 /root/nanoclaw/logs/nanoclaw.log
+
+readiness:
+  - name: amplifierd-up
+    http:
+      url: http://localhost:8410/health
+      expect_json: {"status": "healthy"}
+  - name: docker-up
+    command: "docker info > /dev/null"
+  - name: nanoclaw-running
+    command: "pgrep -af 'node dist/index' > /dev/null"
+
+access:
+  ports:
+    - host: 18410
+      container: 8410
+      label: amplifierd

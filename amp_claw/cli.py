@@ -187,7 +187,17 @@ are bound at session start.
 
 def _amp_url() -> str:
     cfg = load_config()
+    # Probe URL is always loopback for local control, even when amplifierd
+    # binds 0.0.0.0 for external (docker bridge) clients.
     return f"http://127.0.0.1:{cfg.get('port', 8410)}"
+
+
+def _amp_bind_host() -> str:
+    """Where amplifierd binds for inbound traffic. Defaults to 127.0.0.1 for
+    isolation; set to 0.0.0.0 (or a specific iface) when the agent runs in a
+    sibling container that reaches us via host.docker.internal or a bridge."""
+    cfg = load_config()
+    return cfg.get("bind_host", "127.0.0.1")
 
 
 def is_running() -> bool:
@@ -216,6 +226,7 @@ def start_daemon() -> int:
     env["AMPLIFIERD_PROJECTS_DIR"] = str(DATA_DIR / "projects")
     cmd = [
         str(AMPD_BIN), "serve",
+        "--host", _amp_bind_host(),
         "--port", str(port),
         "--bundle", f"nanoclaw-amp=file://{bundle_path}",
         "--default-bundle", "nanoclaw-amp",
@@ -287,7 +298,9 @@ def backend_list() -> None:
 @click.option("--model", help="Override the backend's default model")
 @click.option("--endpoint", help="Endpoint URL (for chat-completions, vllm, ollama)")
 @click.option("--port", type=int, help="amplifierd port (default 8410)")
-def backend_set(name: str, model: str | None, endpoint: str | None, port: int | None) -> None:
+@click.option("--bind-host", help="amplifierd bind address. Default 127.0.0.1. Use 0.0.0.0 when nanoclaw containers reach us via host.docker.internal.")
+def backend_set(name: str, model: str | None, endpoint: str | None,
+                port: int | None, bind_host: str | None) -> None:
     if name not in BACKENDS:
         click.echo(f"✗ Unknown backend '{name}'. Try `amp-claw backend list`.", err=True)
         sys.exit(1)
@@ -296,7 +309,9 @@ def backend_set(name: str, model: str | None, endpoint: str | None, port: int | 
     cfg["model"] = model or BACKENDS[name]["default_model"]
     if endpoint: cfg["endpoint"] = endpoint
     if port: cfg["port"] = port
+    if bind_host: cfg["bind_host"] = bind_host
     cfg.setdefault("port", 8410)
+    cfg.setdefault("bind_host", "127.0.0.1")
     save_config(cfg)
     bundle_path = write_bundle(name, model, endpoint)
     click.echo(f"✓ Backend set to {name} (model={cfg['model']})")
@@ -462,7 +477,7 @@ Description=amplifierd (nanoclaw-on-amplifier brain)
 After=network.target
 
 [Service]
-ExecStart={AMPD_BIN} serve --port {load_config().get('port', 8410)} --bundle nanoclaw-amp=file://{BUNDLE_DIR}/nanoclaw-amp.md --default-bundle nanoclaw-amp
+ExecStart={AMPD_BIN} serve --host {load_config().get('bind_host', '127.0.0.1')} --port {load_config().get('port', 8410)} --bundle nanoclaw-amp=file://{BUNDLE_DIR}/nanoclaw-amp.md --default-bundle nanoclaw-amp
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-{KEYS_PATH}
 Environment=AMPLIFIERD_HOME_DIR={DATA_DIR}
