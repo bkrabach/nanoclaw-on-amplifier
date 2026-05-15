@@ -13,6 +13,10 @@
  * MIT licensed; ships with the nanoclaw-on-amplifier wedge skill.
  */
 
+// Self-register with nanoclaw's provider-registry at module load time.
+// The barrel `providers/index.ts` imports this file for side-effect.
+import { registerProvider } from './provider-registry.js';
+
 // ---------- Types matching nanoclaw's AgentProvider contract ----------
 // (intentionally inlined so this file is self-contained; nanoclaw's
 // providers/types.ts is the canonical source and these must match.)
@@ -541,16 +545,8 @@ class AmplifierQuery implements AgentQuery {
   }
 }
 
-// ---------- Module registration helper (used by nanoclaw provider-registry) ----------
-
-export function createProvider(opts: ProviderOptions): AgentProvider {
-  return new AmplifierProvider(opts);
-}
-
-// nanoclaw's container/agent-runner/src/providers/index.ts expects a default
-// export with a `name` property and a `create` factory.  We satisfy that.
-export default {
-  name: "amplifier",
-  supportsNativeSlashCommands: false,
-  create: (opts: ProviderOptions): AgentProvider => new AmplifierProvider(opts),
-};
+// ---------- Self-registration at module load ----------
+// nanoclaw's provider-registry expects each provider module to call
+// registerProvider(name, factory) at top level so the barrel import in
+// providers/index.ts triggers registration as a side-effect.
+registerProvider("amplifier", (opts: ProviderOptions): AgentProvider => new AmplifierProvider(opts));
