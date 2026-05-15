@@ -317,55 +317,50 @@ class AmplifierQuery implements AgentQuery {
   // ---- The lifecycle ----
 
   private async start(): Promise<void> {
-    // 1. Reuse or create amplifierd session.
+    // 1. Create a fresh amplifierd session per query call.
     //
-    //    If we got a `continuation` from a previous turn, it IS our
-    //    amplifierd session_id.  amplifierd keeps the in-memory session
-    //    alive across turns, so re-creating each turn would be wrong.
-    //    We just verify it exists via a HEAD-ish probe; if not, fall through
-    //    and create fresh.
-    let sessionId = this.input.continuation;
-    let isNewSession = false;
-    if (sessionId) {
-      const exists = await this.sessionExists(sessionId);
-      if (!exists) {
-        sessionId = undefined;
-        // fall through to create
-      }
-    }
-    if (!sessionId) {
-      const created = await createSession({
-        workingDir: this.input.cwd || "/workspace/agent",
-        bundleName: DEFAULT_BUNDLE,
-        systemAddendum: this.input.systemContext?.instructions,
-      });
-      sessionId = created.session_id;
-      isNewSession = true;
-    }
+    //    We intentionally do NOT reuse continuation. Two reasons:
+    //    (a) The build-up bundle composes context-simple into each
+    //        session, but that context is wiped when the agent container
+    //        is killed and recreated — so cross-container continuity is
+    //        not a property we can preserve here regardless.
+    //    (b) Reusing the same amplifierd session across multiple
+    //        provider.query() invocations from nanoclaw's poll-loop puts
+    //        the session into a state the second /execute mishandles
+    //        (observed: turn 1 works, turn 2 silently hangs the poll-loop).
+    //
+    //    Conversation history within a turn is preserved by amplifierd's
+    //    own in-session context. Cross-turn history is provided by
+    //    nanoclaw via the prompt itself (the assembled multi-message
+    //    prompt that's already standard for nanoclaw providers).
+    const created = await createSession({
+      workingDir: this.input.cwd || "/workspace/agent",
+      bundleName: DEFAULT_BUNDLE,
+    });
+    const sessionId = created.session_id;
     this.currentSessionId = sessionId;
 
-    // 2. Yield `init` so the poll-loop can persist our continuation immediately
-    //    (this is critical for crash recovery — see add-codex/SKILL.md).
+    // 2. Yield `init` so the poll-loop persists continuation immediately
+    //    (critical for crash recovery).
     this.emit({ type: "init", continuation: sessionId });
 
-    // 3. If this is a NEW session and we have a system addendum, inject it
-    //    as a "system" message via the context endpoint so amplifierd's
-    //    AmplifierSession sees the <message to="..."> contract.
-    if (isNewSession && this.input.systemContext?.instructions) {
-      await this.injectSystemMessage(sessionId, this.input.systemContext.instructions)
-        .catch((err) => {
-          // Non-fatal: best effort
-          this.emit({ type: "progress", message: `system addendum inject failed: ${err}` });
-        });
-    }
-
-    // 4. Run the turn(s).  amplifierd allows one execute per session at a
-    //    time; mid-turn push() calls queue and we drain between turns.
-    const initialPrompt = this.input.prompt;
-    await this.runTurn(sessionId, initialPrompt);
-    while (this.pendingFollowups.length > 0 && !this.abortCtrl.signal.aborted) {
-      const next = this.pendingFollowups.shift()!;
-      await this.runTurn(sessionId, next);
+    // 3. Run the turn(s).  We compose nanoclaw's runtime system addendum
+    //    (the <message to="name"> contract + destinations) directly into
+    //    the prompt rather than via /context/messages — the bundle's
+    //    instruction body already establishes the <message> output
+    //    contract as a SYSTEM message, and amplifierd's /context/messages
+    //    endpoint requires explicit context-manager mount config that we
+    //    aren't relying on.
+    const addendum = this.input.systemContext?.instructions;
+    while (true) {
+      const prompt = this.pendingFollowups.length > 0
+        ? this.pendingFollowups.shift()!
+        : this.input.prompt;
+      const wrapped = addendum
+        ? `[system-context]\n${addendum}\n[/system-context]\n\n${prompt}`
+        : prompt;
+      await this.runTurn(sessionId, wrapped);
+      if (this.pendingFollowups.length === 0 || this.abortCtrl.signal.aborted) break;
     }
     this.finish();
   }
@@ -398,56 +393,22 @@ class AmplifierQuery implements AgentQuery {
   }
 
   /**
-   * Execute one turn via the streaming endpoint.  Streams amplifierd events
-   * over SSE, translates them into nanoclaw ProviderEvents, accumulates
-   * content_block:delta text into a `result` payload at execution:end.
+   * Execute one turn via the synchronous `/execute` endpoint.
+   *
+   * For v1 we use the synchronous path (proven to work with build-up +
+   * provider-anthropic — see `amp-claw doctor`'s round-trip test). Heartbeat
+   * `activity` events keep nanoclaw's host-sweep from killing us during the
+   * potentially-long execute call.
+   *
+   * A future v2 may switch to /execute/stream for token-by-token streaming
+   * to channels that support it, but most Telegram-class channels deliver
+   * once anyway, so this isn't on the critical path.
    */
   private async runTurn(sessionId: string, prompt: string): Promise<void> {
     const turnDeadline = Date.now() + TURN_TIMEOUT_MS;
-    const correlationId: string | undefined = undefined; // amplifierd assigns this
-    let resultText: string = "";
-    let sawExecutionEnd = false;
     let lastActivityAt = Date.now();
 
-    // (1) Kick off the turn (returns 202 with a correlation_id).
-    let kickoff: { correlation_id: string };
-    try {
-      kickoff = await postJSON<{ correlation_id: string }>(
-        `/sessions/${encodeURIComponent(sessionId)}/execute/stream`,
-        { prompt },
-        this.abortCtrl.signal,
-      );
-    } catch (err: any) {
-      this.emit({
-        type: "error",
-        message: `execute/stream kickoff failed: ${err?.message ?? err}`,
-        retryable: err instanceof HttpError ? err.status >= 500 : true,
-        classification: err?.status === 429 ? "quota" : undefined,
-      });
-      return;
-    }
-    void correlationId; // we filter on session below
-    const expectCorrelation = kickoff.correlation_id;
-
-    // (2) Subscribe to events for this session.  amplifierd auto-includes
-    //     descendant child-session events, so build-up's sub-agents flow
-    //     here too.  We filter to our turn via correlation_id when present.
-    const eventsResp = await fetch(
-      `${AMPLIFIERD_URL}/events?session=${encodeURIComponent(sessionId)}`,
-      { headers: authHeaders(), signal: this.abortCtrl.signal },
-    );
-    if (!eventsResp.ok) {
-      this.emit({
-        type: "error",
-        message: `events stream returned ${eventsResp.status}`,
-        retryable: true,
-      });
-      return;
-    }
-
-    // (3) Heartbeat: every HEARTBEAT_MS, emit `activity` so the poll-loop
-    //     touches .heartbeat (host-sweep would kill us otherwise during
-    //     long delegations).  We also re-emit on every meaningful event.
+    // Heartbeat thread so nanoclaw's host-sweep sees us as alive.
     const hb = setInterval(() => {
       if (Date.now() - lastActivityAt > HEARTBEAT_MS / 2) {
         this.emit({ type: "activity" });
@@ -455,92 +416,38 @@ class AmplifierQuery implements AgentQuery {
       }
     }, HEARTBEAT_MS);
 
+    let resultText = "";
     try {
-      for await (const frame of parseSSE(eventsResp, this.abortCtrl.signal)) {
-        if (Date.now() > turnDeadline) {
-          this.emit({
-            type: "error",
-            message: `turn exceeded ${TURN_TIMEOUT_MS / 1000}s timeout`,
-            retryable: true,
-          });
-          break;
-        }
-        if (!frame.data) continue;
-        let envelope: any;
-        try { envelope = JSON.parse(frame.data); } catch { continue; }
-        // amplifierd sse envelope:
-        //   { event, data, session_id, timestamp, correlation_id, sequence }
-        // Optionally filter by correlation_id of OUR turn so we ignore
-        // events from prior turns on the same session.
-        if (
-          envelope.correlation_id &&
-          expectCorrelation &&
-          envelope.correlation_id !== expectCorrelation
-        ) continue;
-
-        const eventName: string = frame.event || envelope.event || "";
-        const data = envelope.data || {};
-
-        // Emit liveness for every event, with light throttling
-        if (Date.now() - lastActivityAt > 500) {
-          this.emit({ type: "activity" });
-          lastActivityAt = Date.now();
-        }
-
-        switch (eventName) {
-          case "content_block:delta":
-            if (typeof data.text === "string") {
-              resultText += data.text;
-            } else if (typeof data.delta?.text === "string") {
-              resultText += data.delta.text;
-            }
-            break;
-          case "tool:pre":
-            this.emit({
-              type: "progress",
-              message: `tool: ${data.tool_name || "?"}`,
-            });
-            break;
-          case "execution:end":
-            sawExecutionEnd = true;
-            // If amplifierd surfaced a final response string, prefer it.
-            if (typeof data.response === "string" && data.response.length > 0) {
-              resultText = data.response;
-            }
-            // Don't break the loop yet — drain a few more frames so
-            // late content_block:stop deltas come in.
-            break;
-          case "approval:required":
-            // For v1, we auto-deny tool approvals (rare in build-up
-            // because the bundle doesn't include hooks-approval).
-            if (envelope.session_id && data.request_id) {
-              postJSON(
-                `/sessions/${encodeURIComponent(envelope.session_id)}/approvals/${encodeURIComponent(data.request_id)}`,
-                { approved: false, message: "auto-denied by amplifier.ts provider (v1)" },
-              ).catch(() => undefined);
-            }
-            break;
-          case "session:end":
-          case "session:fork":
-          case "session:resume":
-          case "session:start":
-          case "delegate:agent_spawned":
-          case "delegate:agent_completed":
-            // Informational; activity already emitted above
-            break;
-          default:
-            // Unknown event — pass through as progress for observability
-            // (cheap, no big payload dumps).
-            break;
-        }
-
-        if (sawExecutionEnd) break;
+      const remaining = Math.max(5_000, turnDeadline - Date.now());
+      const r = await fetch(`${AMPLIFIERD_URL}/sessions/${encodeURIComponent(sessionId)}/execute`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify({ prompt }),
+        signal: AbortSignal.timeout(remaining),
+      });
+      if (!r.ok) {
+        const text = await r.text().catch(() => "");
+        this.emit({
+          type: "error",
+          message: `execute returned ${r.status}: ${text.slice(0, 300)}`,
+          retryable: r.status >= 500,
+          classification: r.status === 429 ? "quota" : undefined,
+        });
+        return;
       }
+      const body = (await r.json()) as { response?: string | null };
+      resultText = body.response ?? "";
+    } catch (err: any) {
+      this.emit({
+        type: "error",
+        message: `execute failed: ${err?.message ?? err}`,
+        retryable: true,
+      });
+      return;
     } finally {
       clearInterval(hb);
     }
 
-    // (4) Emit the final result
     this.emit({ type: "result", text: resultText || null });
   }
 }
