@@ -209,6 +209,10 @@ fi
 # ---------- Wedge the provider files into nanoclaw ----------
 if [[ $AMPLIFIERD_ONLY -eq 1 ]]; then
   say "Skipping nanoclaw wedge (--amplifierd-only)"
+  # Start amplifierd as a background process (not a system service — appropriate
+  # for DTUs and other ephemeral or non-systemd contexts). The non-amplifierd-only
+  # path calls `amp-claw service install` instead.
+  "$HOME/.nanoclaw-amp/bin/amp-claw" restart
   "$HOME/.nanoclaw-amp/bin/amp-claw" doctor || warn "doctor reported issues; check logs"
   exit 0
 fi
