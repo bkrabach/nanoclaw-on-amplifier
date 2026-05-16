@@ -258,50 +258,18 @@ done
 # injection. The `amplifier` provider doesn't use OneCLI — amplifierd runs
 # on the host and the container reaches it via plain HTTP with NO_PROXY
 # bypass. Without this patch a fresh user with no OneCLI account gets a
-# hard 401 on every message they send. Idempotent: re-running is a no-op.
+# hard 401 on every message they send. Idempotent (the helper detects an
+# already-applied marker and no-ops).
+PATCH_SCRIPT="$SCRIPT_DIR/scripts/apply-onecli-bypass.py"
+if [[ ! -f "$PATCH_SCRIPT" ]]; then
+  # curl-pipe install path: fetch the helper too
+  TMP_PATCH=$(mktemp)
+  curl -fsSL "https://raw.githubusercontent.com/bkrabach/nanoclaw-on-amplifier/main/scripts/apply-onecli-bypass.py" \
+    -o "$TMP_PATCH"
+  PATCH_SCRIPT="$TMP_PATCH"
+fi
 say "Applying OneCLI bypass patch for provider=amplifier"
-python3 - "$NANOCLAW_DIR/src/container-runner.ts" <<'PYEOF'
-import sys, pathlib
-p = pathlib.Path(sys.argv[1])
-if not p.exists():
-    print(f"  ⚠ {p} not found — skipping (run nanoclaw setup first)")
-    sys.exit(0)
-src = p.read_text()
-marker = "OneCLI gateway skipped (provider=amplifier)"
-if marker in src:
-    print("  ✓ OneCLI bypass already applied")
-    sys.exit(0)
-needle = """  if (agentIdentifier) {
-    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
-  }
-  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
-  if (!onecliApplied) {
-    throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
-  }
-  log.info('OneCLI gateway applied', { containerName });"""
-if needle not in src:
-    print("  ⚠ OneCLI block not found in expected shape — nanoclaw may have moved upstream")
-    print("    Patch skipped; install will still complete but Amplifier provider may hit 401 from OneCLI.")
-    print("    Check container-runner.ts around the OneCLI section and apply manually.")
-    sys.exit(0)
-replacement = """  // amp-claw patch: skip OneCLI gateway for the `amplifier` provider.
-  // amplifierd handles auth on the host directly; the container reaches it
-  // via plain HTTP using the NO_PROXY entries injected by our provider.
-  if (provider !== 'amplifier') {
-    if (agentIdentifier) {
-      await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
-    }
-    const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
-    if (!onecliApplied) {
-      throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
-    }
-    log.info('OneCLI gateway applied', { containerName });
-  } else {
-    log.info('OneCLI gateway skipped (provider=amplifier)', { containerName });
-  }"""
-p.write_text(src.replace(needle, replacement))
-print("  ✓ OneCLI bypass applied to container-runner.ts")
-PYEOF
+python3 "$PATCH_SCRIPT" "$NANOCLAW_DIR" || warn "OneCLI patch failed — amplifier provider may hit 401 on first spawn"
 
 # Rebuild nanoclaw dist/ so the patched container-runner takes effect on next spawn
 if [[ -f "$NANOCLAW_DIR/package.json" ]]; then

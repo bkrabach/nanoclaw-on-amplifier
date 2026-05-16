@@ -96,9 +96,16 @@ provision:
     - cp /root/nanoclaw-on-amplifier/nanoclaw-skill/add-amplifier/host-amplifier.ts /root/nanoclaw/src/providers/amplifier.ts
     - LINE="import './amplifier.js';" && grep -qxF "$LINE" /root/nanoclaw/src/providers/index.ts || echo "$LINE" >> /root/nanoclaw/src/providers/index.ts
     - LINE="import './amplifier.js';" && grep -qxF "$LINE" /root/nanoclaw/container/agent-runner/src/providers/index.ts || echo "$LINE" >> /root/nanoclaw/container/agent-runner/src/providers/index.ts
-    # Rebuild to pick up our provider
+    # Apply OneCLI bypass patch via shared helper.
+    # Background: nanoclaw's container-runner.ts unconditionally invokes
+    # app.onecli.sh on every spawn for credential injection. The amplifier
+    # provider doesn't use OneCLI (amplifierd handles auth on the host).
+    # Without this patch, a fresh DTU/user without an OneCLI account hits
+    # a hard 401 on every message. Idempotent.
+    - python3 /root/nanoclaw-on-amplifier/scripts/apply-onecli-bypass.py /root/nanoclaw
+    # Rebuild to pick up our provider + the OneCLI patch
     - cd /root/nanoclaw && pnpm run build 2>&1 | tail -10
-    - echo "Phase 8 done — amplifier provider wedged + nanoclaw rebuilt"
+    - echo "Phase 8 done — amplifier provider wedged, OneCLI patch applied, nanoclaw rebuilt"
 
     # ---------- Phase 9: init-first-agent for the existing Telegram chat ----------
     # The user (chat_id ${TELEGRAM_CHAT_ID}) has already DM'd the bot once.
