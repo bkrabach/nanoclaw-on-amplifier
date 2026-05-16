@@ -121,6 +121,67 @@ next container spawn — no rebuild, no restart needed. (Recon confirmed this:
 `add-opencode/SKILL.md:96-104` describes a v2-sessions overlay that no longer
 applies in current main.)
 
+## Step 3b — Patch container-runner.ts to skip OneCLI for `provider=amplifier`
+
+Nanoclaw's `src/container-runner.ts` unconditionally calls the OneCLI gateway
+on every container spawn (`onecli.ensureAgent` + `onecli.applyContainerConfig`)
+and throws if either fails. OneCLI is a credential-proxy service at
+`app.onecli.sh` that requires a real account. The `amplifier` provider does
+not use it — amplifierd runs on the host and the container reaches it via
+plain HTTP using the `NO_PROXY` entries our provider injects.
+
+Without this patch, a fresh user with no OneCLI account hits a hard 401 on
+every message. With it, OneCLI is bypassed for `provider=amplifier` only;
+other providers (claude, codex, opencode, ollama) keep the unchanged flow.
+
+Apply the patch (idempotent — re-running is a no-op):
+
+```bash
+python3 - <<'PY'
+import pathlib
+p = pathlib.Path("src/container-runner.ts")
+src = p.read_text()
+marker = "OneCLI gateway skipped (provider=amplifier)"
+if marker in src:
+    print("✓ OneCLI bypass already applied")
+    raise SystemExit
+needle = """  if (agentIdentifier) {
+    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+  }
+  const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+  if (!onecliApplied) {
+    throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
+  }
+  log.info('OneCLI gateway applied', { containerName });"""
+if needle not in src:
+    raise SystemExit("⚠ OneCLI block not found in expected shape — nanoclaw moved upstream; apply manually")
+replacement = """  // amp-claw patch: skip OneCLI for `provider=amplifier`. amplifierd
+  // handles auth on the host; the container reaches it via plain HTTP
+  // with NO_PROXY bypass injected by our provider's container-config.
+  if (provider !== 'amplifier') {
+    if (agentIdentifier) {
+      await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+    }
+    const onecliApplied = await onecli.applyContainerConfig(args, { addHostMapping: false, agent: agentIdentifier });
+    if (!onecliApplied) {
+      throw new Error('OneCLI gateway not applied — refusing to spawn container without credentials');
+    }
+    log.info('OneCLI gateway applied', { containerName });
+  } else {
+    log.info('OneCLI gateway skipped (provider=amplifier)', { containerName });
+  }"""
+p.write_text(src.replace(needle, replacement))
+print("✓ OneCLI bypass applied")
+PY
+pnpm run build  # rebuild dist/ so the patched container-runner takes effect on next spawn
+```
+
+This is the *one* unavoidable trunk patch this skill applies — every other
+piece of the wedge lives in our own files. Upstream nanoclaw doesn't yet
+expose a per-provider OneCLI opt-out hook, so we patch the conditional in
+directly. If nanoclaw refactors this block, the `python3` script above will
+print a warning and skip cleanly; rerun the skill after updating the needle.
+
 ## Step 4 — Install amplifierd in an isolated namespace
 
 Skip if `~/.nanoclaw-amp/bin/amplifierd` already exists.

@@ -317,27 +317,28 @@ class AmplifierQuery implements AgentQuery {
   // ---- The lifecycle ----
 
   private async start(): Promise<void> {
-    // 1. Create a fresh amplifierd session per query call.
+    // 1. Reuse or create amplifierd session.
     //
-    //    We intentionally do NOT reuse continuation. Two reasons:
-    //    (a) The build-up bundle composes context-simple into each
-    //        session, but that context is wiped when the agent container
-    //        is killed and recreated — so cross-container continuity is
-    //        not a property we can preserve here regardless.
-    //    (b) Reusing the same amplifierd session across multiple
-    //        provider.query() invocations from nanoclaw's poll-loop puts
-    //        the session into a state the second /execute mishandles
-    //        (observed: turn 1 works, turn 2 silently hangs the poll-loop).
+    //    If we got a `continuation` from a previous turn, it IS our
+    //    amplifierd session_id. Reuse it so build-up's context module
+    //    can accumulate the conversation history across turns within
+    //    the same agent-runner container lifetime. This is the value
+    //    of running build-up: the same agent session sees prior turns.
     //
-    //    Conversation history within a turn is preserved by amplifierd's
-    //    own in-session context. Cross-turn history is provided by
-    //    nanoclaw via the prompt itself (the assembled multi-message
-    //    prompt that's already standard for nanoclaw providers).
-    const created = await createSession({
-      workingDir: this.input.cwd || "/workspace/agent",
-      bundleName: DEFAULT_BUNDLE,
-    });
-    const sessionId = created.session_id;
+    //    sessionExists() check handles stale ids (amplifierd was restarted,
+    //    session expired) — fall back to fresh create rather than erroring.
+    let sessionId = this.input.continuation;
+    if (sessionId) {
+      const exists = await this.sessionExists(sessionId);
+      if (!exists) sessionId = undefined;
+    }
+    if (!sessionId) {
+      const created = await createSession({
+        workingDir: this.input.cwd || "/workspace/agent",
+        bundleName: DEFAULT_BUNDLE,
+      });
+      sessionId = created.session_id;
+    }
     this.currentSessionId = sessionId;
 
     // 2. Yield `init` so the poll-loop persists continuation immediately
@@ -374,21 +375,6 @@ class AmplifierQuery implements AgentQuery {
       return r.status === 200;
     } catch {
       return false;
-    }
-  }
-
-  private async injectSystemMessage(sessionId: string, instructions: string): Promise<void> {
-    // amplifierd has POST /sessions/{id}/context/messages.  We inject as
-    // role=system with the build-up <message to=...> contract addendum.
-    try {
-      await postJSON(`/sessions/${encodeURIComponent(sessionId)}/context/messages`, {
-        role: "system",
-        content: instructions,
-      });
-    } catch (e: any) {
-      // Older amplifierd may use a different endpoint shape.  Don't fail the
-      // whole turn — just log progress.
-      this.emit({ type: "progress", message: `context inject error: ${e?.message ?? e}` });
     }
   }
 
